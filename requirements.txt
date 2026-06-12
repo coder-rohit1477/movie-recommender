@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pandas
+numpy==1.26.4
+scikit-learn
+scikit-surprise
+python-multipart
+faiss-cpu
+redis
+requests
+python-dotenv

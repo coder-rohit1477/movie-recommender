@@ -1,0 +1,17 @@
+venv/
+.venv/
+
+__pycache__/
+*.pyc
+
+frontend/.next/
+
+models/
+data/
+
+node_modules/
+
+*.pkl
+*.joblib
+*.index
+*.csv

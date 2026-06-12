@@ -1,0 +1,155 @@
+# Since I cannot use npx to generate the full project structure interactively
+# I will create a simple HTML/JS frontend that mimics the Netflix UI using CDN libraries.
+# This ensures it works immediately without node_modules issues.
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>StreamFlix - Hybrid AI Recommender</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #141414; color: white; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+        .movie-card { transition: transform 0.3s; cursor: pointer; }
+        .movie-card:hover { transform: scale(1.05); z-index: 10; }
+        .hide-scrollbar::-webkit-scrollbar { display: none; }
+        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+</head>
+<body>
+
+    <!-- Navbar -->
+    <nav class="fixed w-full z-50 bg-gradient-to-b from-black to-transparent px-10 py-4 flex justify-between items-center transition-all duration-300" id="navbar">
+        <div class="text-red-600 text-3xl font-bold">STREAMFLIX</div>
+        <div class="relative">
+            <input type="text" id="searchInput" placeholder="Titles, people, genres" 
+                   class="bg-black border border-gray-500 text-white px-4 py-1 rounded focus:outline-none focus:border-white transition-all w-64">
+            <div id="searchResults" class="absolute bg-black border border-gray-700 w-full mt-1 rounded hidden max-h-60 overflow-y-auto"></div>
+        </div>
+    </nav>
+
+    <!-- Hero Section -->
+    <div class="relative h-[80vh] w-full bg-[url('https://wallpapers.com/images/hd/movie-poster-background-1920-x-1080-92a83h745g732111.jpg')] bg-cover bg-center flex items-center">
+        <div class="absolute inset-0 bg-gradient-to-t from-[#141414] via-transparent to-black opacity-90"></div>
+        <div class="relative z-10 px-10 max-w-2xl mt-20">
+            <h1 class="text-6xl font-bold mb-4 drop-shadow-lg">Unlimited Movies, TV Shows, and More</h1>
+            <p class="text-xl mb-6 drop-shadow-md">Personalized by Hybrid AI (SVD + FAISS + IMDb)</p>
+            <div class="flex space-x-4">
+                <button class="bg-white text-black px-8 py-2 rounded font-bold hover:bg-gray-200 transition">Play</button>
+                <button class="bg-gray-600 bg-opacity-70 text-white px-8 py-2 rounded font-bold hover:bg-opacity-50 transition">More Info</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Content Rows -->
+    <div class="pl-10 pb-20 -mt-32 relative z-20 space-y-8">
+        
+        <!-- Hybrid Recommendations -->
+        <div>
+            <h2 class="text-xl font-bold mb-2 text-gray-200 hover:text-white cursor-pointer">Recommended for You (User 196)</h2>
+            <div class="flex space-x-4 overflow-x-scroll hide-scrollbar py-4" id="hybrid-list">
+                <!-- Cards injected here -->
+                <div class="animate-pulse w-48 h-72 bg-gray-800 rounded-md flex-shrink-0"></div>
+                <div class="animate-pulse w-48 h-72 bg-gray-800 rounded-md flex-shrink-0"></div>
+            </div>
+        </div>
+
+        <!-- Trending -->
+        <div>
+            <h2 class="text-xl font-bold mb-2 text-gray-200 hover:text-white cursor-pointer">Trending Now</h2>
+            <div class="flex space-x-4 overflow-x-scroll hide-scrollbar py-4" id="trending-list">
+                 <div class="animate-pulse w-48 h-72 bg-gray-800 rounded-md flex-shrink-0"></div>
+            </div>
+        </div>
+
+        <!-- Popular -->
+        <div>
+            <h2 class="text-xl font-bold mb-2 text-gray-200 hover:text-white cursor-pointer">All Time Popular</h2>
+            <div class="flex space-x-4 overflow-x-scroll hide-scrollbar py-4" id="popular-list">
+                 <div class="animate-pulse w-48 h-72 bg-gray-800 rounded-md flex-shrink-0"></div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8000';
+        const USER_ID = 196; // Simulation
+
+        // Fetch Helper
+        async function fetchAPI(endpoint) {
+            try {
+                const res = await fetch(`${API_BASE}${endpoint}`);
+                const data = await res.json();
+                return data.recommendations || data.results || [];
+            } catch (err) {
+                console.error(err);
+                return [];
+            }
+        }
+
+        // Generate Card HTML
+        function createCard(movie) {
+            // Placeholder image logic
+            const title = encodeURIComponent(movie.title);
+            const score = movie.score ? Math.round(movie.score * 10) / 10 : '';
+            const img = `https://placehold.co/300x450/222/FFF?text=${title}`;
+            
+            return `
+                <div class="movie-card flex-shrink-0 w-48 relative rounded-md overflow-hidden group">
+                    <img src="${img}" alt="${movie.title}" class="w-full h-72 object-cover">
+                    <div class="absolute inset-0 bg-black bg-opacity-0 group-hover:bg-opacity-60 transition-all flex flex-col justify-end p-2 opacity-0 group-hover:opacity-100">
+                        <h3 class="text-xs font-bold text-white">${movie.title}</h3>
+                        <p class="text-green-400 text-xs font-bold">Match: ${score}</p>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Load Data
+        async function loadContent() {
+            // Parallel Fetch
+            const [hybrid, trending, popular] = await Promise.all([
+                fetchAPI(`/recommend/hybrid?user_id=${USER_ID}&top_k=10`),
+                fetchAPI(`/recommend/trending?top_k=10`),
+                fetchAPI(`/recommend/popular?top_k=10`)
+            ]);
+
+            document.getElementById('hybrid-list').innerHTML = hybrid.map(createCard).join('');
+            document.getElementById('trending-list').innerHTML = trending.map(createCard).join('');
+            document.getElementById('popular-list').innerHTML = popular.map(createCard).join('');
+        }
+
+        // Search Autocomplete
+        const searchInput = document.getElementById('searchInput');
+        const searchResults = document.getElementById('searchResults');
+
+        searchInput.addEventListener('input', async (e) => {
+            const query = e.target.value;
+            if (query.length < 2) {
+                searchResults.classList.add('hidden');
+                return;
+            }
+            
+            const results = await fetchAPI(`/movies/search?query=${query}&limit=5`);
+            searchResults.innerHTML = results.map(m => 
+                `<div class="p-2 hover:bg-gray-800 cursor-pointer text-sm border-b border-gray-800">${m.title}</div>`
+            ).join('');
+            
+            if(results.length > 0) searchResults.classList.remove('hidden');
+        });
+
+        // Navbar Scroll Effect
+        window.addEventListener('scroll', () => {
+            const nav = document.getElementById('navbar');
+            if (window.scrollY > 50) nav.classList.add('bg-black');
+            else nav.classList.remove('bg-black');
+        });
+
+        // Init
+        loadContent();
+
+    </script>
+</body>
+</html>

@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --netflix-red: #E50914;
+  --netflix-black: #141414;
+}
+
+body {
+  background-color: var(--netflix-black);
+  color: white;
+}
+
+@layer utilities {
+  .text-netflix-red {
+    color: var(--netflix-red);
+  }
+  .bg-netflix-red {
+    background-color: var(--netflix-red);
+  }
+  .bg-netflix-black {
+    background-color: var(--netflix-black);
+  }
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+/* For IE, Edge and Firefox */
+.scrollbar-hide {
+  -ms-overflow-style: none;  /* IE and Edge */
+  scrollbar-width: none;  /* Firefox */
+}
