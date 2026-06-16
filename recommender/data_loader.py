@@ -10,9 +10,20 @@ class DataLoader:
     @staticmethod
     def load_ratings():
         if os.path.exists(settings.RATINGS_FILE_20M):
-            df = pd.read_csv(settings.RATINGS_FILE_20M, usecols=['userId', 'movieId', 'rating'])
+            # Load with timestamp
+            df = pd.read_csv(settings.RATINGS_FILE_20M, usecols=['userId', 'movieId', 'rating', 'timestamp'])
+            
+            # User-aware sampling
             if len(df) > SAMPLE_SIZE:
-                df = df.sample(n=SAMPLE_SIZE, random_state=RANDOM_STATE)
+                unique_users = df['userId'].unique()
+                avg_ratings_per_user = len(df) / len(unique_users)
+                n_users_to_sample = int(SAMPLE_SIZE / avg_ratings_per_user)
+                sampled_users = pd.Series(unique_users).sample(
+                    n=min(len(unique_users), n_users_to_sample), 
+                    random_state=RANDOM_STATE
+                )
+                df = df[df['userId'].isin(sampled_users)]
+                
             df['userId'] = df['userId'].astype(str)
             df['movieId'] = df['movieId'].astype(str)
             return df

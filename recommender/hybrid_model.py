@@ -67,66 +67,158 @@ class HybridModel:
             
         return set(self.movies_df[self.movies_df['movieId'].isin(user_ratings['movieId'])]['title'])
 
+    def _retrieve_candidates(self, user_id: str, movie_title: str = None, n_svd: int = 100, n_content: int = 100, n_pop: int = 50) -> Dict:
+        """
+        Stage 1: Candidate Retrieval (High Recall).
+        Aggregates candidates from SVD, FAISS, and Global Popularity.
+        """
+        # 1. Collaborative Retriever (SVD)
+        cf_recs = svd_model.predict(user_id, top_n=n_svd)
+        cf_scores = {k: (v - 1.0) / 4.0 for k, v in cf_recs.items()}
+        
+        # 2. Content Retriever (FAISS)
+        cb_scores = {}
+        if movie_title:
+            cb_recs = faiss_index.search(movie_title, top_n=n_content)
+            cb_scores = cb_recs
+
+        # 3. Popularity Retriever (Global Trends)
+        sorted_pop = sorted(self.popularity_scores.items(), key=lambda x: x[1], reverse=True)
+        pop_candidates = {t for t, _ in sorted_pop[:n_pop]}
+
+        # Merge and Deduplicate
+        candidate_titles = set(cf_scores.keys()) | set(cb_scores.keys()) | pop_candidates
+        
+        return {
+            "titles": candidate_titles,
+            "cf_scores": cf_scores,
+            "cb_scores": cb_scores
+        }
+
+    def _get_candidate_features(self, user_id: str, candidate_titles: Set[str], cf_scores: Dict, cb_scores: Dict, movie_title: str = None) -> pd.DataFrame:
+        """
+        Extracts numerical features for a list of candidates.
+        Used by both the internal ranker and external dataset generators.
+        """
+        # 1. Get User Genre Preferences (Top 3)
+        user_history = self.ratings_df[self.ratings_df['userId'] == user_id] if self.ratings_df is not None else pd.DataFrame()
+        liked_mids = user_history[user_history['rating'] >= 3.5]['movieId']
+        user_genres_series = self.movies_df[self.movies_df['movieId'].isin(liked_mids)]['genres'].str.split('|').explode()
+        top_user_genres = set(user_genres_series.value_counts().head(3).index) if not user_genres_series.empty else set()
+
+        # 2. Get Context Movie Genres
+        context_genres = set()
+        if movie_title:
+            match = self.movies_df[self.movies_df['title'].str.lower() == movie_title.lower()]
+            if not match.empty:
+                context_genres = set(match.iloc[0]['genres'].split('|'))
+
+        # 3. Global Max Votes for normalization
+        vote_counts = self.ratings_df['movieId'].value_counts() if self.ratings_df is not None else pd.Series()
+        max_votes = vote_counts.max() if not vote_counts.empty else 1
+
+        # 4. Maturity-based Alpha
+        rating_count = len(user_history)
+        if rating_count < 10: alpha = 0.3
+        elif rating_count <= 50: alpha = 0.6
+        else: alpha = 0.8
+
+        final_rows = []
+        # Pre-filter movies_df for faster lookup
+        candidates_df = self.movies_df[self.movies_df['title'].isin(candidate_titles)].drop_duplicates('title').set_index('title')
+
+        for title in candidate_titles:
+            if title not in candidates_df.index:
+                continue
+
+            movie_info = candidates_df.loc[title]
+            m_genres = set(movie_info['genres'].split('|'))
+            
+            # Feature calculation
+            genre_overlap = len(m_genres & top_user_genres) / 3.0 if top_user_genres else 0.0
+            context_match = 1.0 if context_genres and (m_genres & context_genres) else 0.0
+            mid = movie_info['movieId']
+            vote_conf = vote_counts.get(mid, 0) / max_votes
+            
+            final_rows.append({
+                "user_id": user_id,
+                "title": title,
+                "svd_score": cf_scores.get(title, 0.0),
+                "content_score": cb_scores.get(title, 0.0),
+                "popularity_score": self.popularity_scores.get(title, 0.0),
+                "genre_overlap": genre_overlap,
+                "context_genre_match": context_match,
+                "vote_confidence": vote_conf,
+                "user_maturity": alpha
+            })
+            
+        return pd.DataFrame(final_rows)
+
+    def _rank_candidates(self, user_id: str, candidates_data: Dict, movie_title: str = None, top_k: int = 10) -> List[Dict]:
+        """
+        Stage 2: Ranking Layer (High Precision).
+        Scores and sorts the retrieved candidates using the feature-based formula.
+        """
+        candidate_titles = candidates_data["titles"]
+        cf_scores = candidates_data["cf_scores"]
+        cb_scores = candidates_data["cb_scores"]
+        
+        rated_movies = self.get_rated_movies(user_id)
+        
+        # 1. Extract Features
+        features_df = self._get_candidate_features(user_id, candidate_titles, cf_scores, cb_scores, movie_title)
+        
+        if features_df.empty:
+            return []
+
+        # 2. Apply Formulaic Ranking (Baseline Ranker)
+        # formula: blended + (0.1 * overlap) + (0.1 * match) + (0.05 * pop) + (0.05 * conf)
+        final_scores = []
+        for _, row in features_df.iterrows():
+            title = row['title']
+            if title in rated_movies: continue
+            
+            alpha = row['user_maturity']
+            if movie_title:
+                blended = (alpha * row['svd_score']) + ((1 - alpha) * row['content_score'])
+                blended += (0.1 * row['genre_overlap']) + (0.1 * row['context_genre_match'])
+            else:
+                blended = row['svd_score'] + (0.1 * row['genre_overlap'])
+            
+            final_score = blended + (0.05 * row['popularity_score']) + (0.05 * row['vote_confidence'])
+            
+            final_scores.append({
+                "title": title, 
+                "score": round(min(1.0, float(final_score)), 4)
+            })
+
+        final_scores.sort(key=lambda x: x['score'], reverse=True)
+        return final_scores[:top_k]
+
     def recommend(self, user_id: str, movie_title: str = None, top_k: int = 10) -> List[Dict]:
         """
-        Combines SVD and FAISS with popularity weighting.
-        Handles unknown users by defaulting to collaborative filtering on all items or popularity.
+        Public API: Orchestrates the two-stage pipeline.
         """
         try:
+            import time
             user_id = str(user_id)
             
-            # 1. Collaborative Recommendations (SVD)
-            # Handles unknown users internally by returning empty/default scores
-            cf_recs = svd_model.predict(user_id, top_n=top_k * 5)
-            # Normalize CF scores (SVD 1-5 -> 0-1)
-            cf_normalized = {k: (v - 1.0) / 4.0 for k, v in cf_recs.items()}
+            # Stage 1: Retrieval (Candidate Generation)
+            start_ret = time.time()
+            candidates_data = self._retrieve_candidates(user_id, movie_title, n_svd=100, n_content=100, n_pop=50)
+            ret_latency = time.time() - start_ret
             
-            # 2. Content-based Recommendations (FAISS)
-            cb_normalized = {}
-            if movie_title:
-                cb_recs = faiss_index.search(movie_title, top_n=top_k * 5)
-                # FAISS scores are already 0-1 similarity
-                cb_normalized = cb_recs
-
-            # 3. Blending Logic
-            rated_movies = self.get_rated_movies(user_id)
-            candidate_titles = set(cf_normalized.keys()) | set(cb_normalized.keys())
+            # Temporary logging for Phase 2B audit
+            # logger.debug(f"Retrieval: pool_size={len(candidates_data['titles'])}, latency={ret_latency:.4f}s")
             
-            # If both are empty (rare), fallback to popularity
-            if not candidate_titles:
+            # Fallback if no candidates found (rare)
+            if not candidates_data["titles"]:
                 logger.info(f"No candidates found for user {user_id}. Using popularity fallback.")
                 sorted_pop = sorted(self.popularity_scores.items(), key=lambda x: x[1], reverse=True)
                 return [{"title": t, "score": round(float(s), 4)} for t, s in sorted_pop[:top_k]]
 
-            # Weighted Alpha based on user maturity
-            rating_count = len(self.ratings_df[self.ratings_df['userId'] == user_id]) if self.ratings_df is not None else 0
-            if rating_count < 10: alpha = 0.3 # New user: prefer content
-            elif rating_count <= 50: alpha = 0.6
-            else: alpha = 0.8 # Mature user: prefer collaborative
-
-            final_scores = []
-            for title in candidate_titles:
-                if title in rated_movies:
-                    continue
-                
-                cf_score = cf_normalized.get(title, 0.0)
-                cb_score = cb_normalized.get(title, 0.0)
-                pop_score = self.popularity_scores.get(title, 0.0)
-                
-                if movie_title:
-                    blended = (alpha * cf_score) + ((1 - alpha) * cb_score)
-                else:
-                    blended = cf_score
-                
-                # Small boost from popularity (5%)
-                final_score = blended + (0.05 * pop_score)
-                final_scores.append({
-                    "title": title, 
-                    "score": round(min(1.0, float(final_score)), 4)
-                })
-
-            final_scores.sort(key=lambda x: x['score'], reverse=True)
-            return final_scores[:top_k]
+            # Stage 2: Ranking
+            return self._rank_candidates(user_id, candidates_data, movie_title, top_k)
 
         except Exception as e:
             logger.error(f"Error generating hybrid recommendations: {e}")

@@ -12,21 +12,31 @@ class SVDModel:
         self.full_trainset = None
         self.all_movie_ids = None
 
+    def fit(self, train_df, movies_df=None):
+        """
+        Fits the SVD model on a provided dataframe.
+        Does NOT save to disk. Useful for evaluation.
+        """
+        if movies_df is None:
+            movies_df = load_movies()
+            
+        self.movie_titles = dict(zip(movies_df['movieId'], movies_df['title']))
+        self.all_movie_ids = list(self.movie_titles.keys())
+        
+        dataset = get_surprise_dataset(train_df)
+        self.full_trainset = dataset.build_full_trainset()
+        
+        self.model = SVD(n_factors=50, n_epochs=10, lr_all=0.005, reg_all=0.02, random_state=42)
+        self.model.fit(self.full_trainset)
+
     def train(self):
         print("Training SVD model...")
         try:
             ratings_df = load_ratings()
             movies_df = load_movies()
             
-            dataset = get_surprise_dataset(ratings_df)
-            
-            # For predict() to work, we need these in memory
-            self.movie_titles = dict(zip(movies_df['movieId'], movies_df['title']))
-            self.all_movie_ids = list(self.movie_titles.keys())
-            
-            self.model = SVD(n_factors=50, n_epochs=10, lr_all=0.005, reg_all=0.02, random_state=42)
-            self.full_trainset = dataset.build_full_trainset()
-            self.model.fit(self.full_trainset)
+            # Use the new fit method
+            self.fit(ratings_df, movies_df)
             
             if not os.path.exists(settings.MODELS_DIR):
                 os.makedirs(settings.MODELS_DIR)

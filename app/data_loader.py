@@ -46,7 +46,7 @@ def load_ratings():
     """
     Loads and caches the ratings dataset from data/ratings.csv.
     Returns:
-        pd.DataFrame: DataFrame containing userId, movieId, and rating.
+        pd.DataFrame: DataFrame containing userId, movieId, rating, and timestamp.
     """
     ratings_path = DATA_DIR / "ratings.csv"
     
@@ -57,13 +57,22 @@ def load_ratings():
         
     logger.info(f"Loading ratings from {ratings_path}")
     
-    # Load only necessary columns to save memory
-    df = pd.read_csv(ratings_path, usecols=['userId', 'movieId', 'rating'])
+    # Load userId, movieId, rating, and timestamp
+    df = pd.read_csv(ratings_path, usecols=['userId', 'movieId', 'rating', 'timestamp'])
     
-    # Optional: sampling for performance if dataset is too large (from original loader)
+    # User-aware sampling to preserve history
     if len(df) > SAMPLE_SIZE:
-        logger.info(f"Sampling dataset to {SAMPLE_SIZE} rows")
-        df = df.sample(n=SAMPLE_SIZE, random_state=RANDOM_STATE)
+        logger.info(f"Applying user-aware sampling (target: approx {SAMPLE_SIZE} ratings)")
+        unique_users = df['userId'].unique()
+        avg_ratings_per_user = len(df) / len(unique_users)
+        n_users_to_sample = int(SAMPLE_SIZE / avg_ratings_per_user)
+        
+        sampled_users = pd.Series(unique_users).sample(
+            n=min(len(unique_users), n_users_to_sample), 
+            random_state=RANDOM_STATE
+        )
+        df = df[df['userId'].isin(sampled_users)]
+        logger.info(f"Sampled {len(sampled_users)} users, resulting in {len(df)} ratings")
         
     # Ensure IDs are strings
     df['userId'] = df['userId'].astype(str)
