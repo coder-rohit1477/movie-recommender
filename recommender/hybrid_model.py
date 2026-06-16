@@ -1,8 +1,10 @@
 from recommender.svd_model import svd_model
 from recommender.faiss_index import faiss_index
+from recommender.ranker import ranker
 from app.data_loader import load_movies, load_ratings
 import pandas as pd
 import logging
+import time
 from typing import List, Dict, Set
 
 # Configure logger
@@ -14,6 +16,8 @@ class HybridModel:
         self.ratings_df = None
         self.popularity_scores = {}
         self._movie_titles_set = set()
+        self.USE_LTR_RANKER = True # Feature Flag
+        self.ranker_loaded = False
 
     def load_metadata(self):
         """Pre-loads movies and ratings into memory for fast lookup."""
@@ -23,6 +27,10 @@ class HybridModel:
             self.ratings_df = load_ratings()
             self._movie_titles_set = set(self.movies_df['title'].str.lower().unique())
             self.compute_popularity_scores()
+            
+            # Load LTR Ranker
+            self.ranker_loaded = ranker.load()
+            
             logger.info("Metadata loaded successfully.")
         except Exception as e:
             logger.error(f"Failed to load metadata: {e}")
@@ -157,7 +165,7 @@ class HybridModel:
     def _rank_candidates(self, user_id: str, candidates_data: Dict, movie_title: str = None, top_k: int = 10) -> List[Dict]:
         """
         Stage 2: Ranking Layer (High Precision).
-        Scores and sorts the retrieved candidates using the feature-based formula.
+        Orchestrates ML-based LambdaRank or heuristic fallback.
         """
         candidate_titles = candidates_data["titles"]
         cf_scores = candidates_data["cf_scores"]
@@ -171,8 +179,30 @@ class HybridModel:
         if features_df.empty:
             return []
 
-        # 2. Apply Formulaic Ranking (Baseline Ranker)
-        # formula: blended + (0.1 * overlap) + (0.1 * match) + (0.05 * pop) + (0.05 * conf)
+        # 2. Strategy A: LambdaRank (Preferred)
+        if self.USE_LTR_RANKER and self.ranker_loaded:
+            try:
+                start_inf = time.time()
+                # Inference
+                scores = ranker.predict(features_df)
+                features_df['final_score'] = scores
+                latency_ms = (time.time() - start_inf) * 1000
+                logger.info(f"LTR Inference Success: {latency_ms:.2f}ms for {len(features_df)} candidates.")
+
+                final_scores = []
+                for _, row in features_df.iterrows():
+                    if row['title'] in rated_movies: continue
+                    final_scores.append({
+                        "title": row['title'], 
+                        "score": round(float(row['final_score']), 4)
+                    })
+                
+                final_scores.sort(key=lambda x: x['score'], reverse=True)
+                return final_scores[:top_k]
+            except Exception as e:
+                logger.error(f"LambdaRank inference failed, falling back to heuristic: {e}")
+
+        # 3. Strategy B: Heuristic Ranking (Fallback)
         final_scores = []
         for _, row in features_df.iterrows():
             title = row['title']
@@ -200,16 +230,10 @@ class HybridModel:
         Public API: Orchestrates the two-stage pipeline.
         """
         try:
-            import time
             user_id = str(user_id)
             
             # Stage 1: Retrieval (Candidate Generation)
-            start_ret = time.time()
             candidates_data = self._retrieve_candidates(user_id, movie_title, n_svd=100, n_content=100, n_pop=50)
-            ret_latency = time.time() - start_ret
-            
-            # Temporary logging for Phase 2B audit
-            # logger.debug(f"Retrieval: pool_size={len(candidates_data['titles'])}, latency={ret_latency:.4f}s")
             
             # Fallback if no candidates found (rare)
             if not candidates_data["titles"]:
